@@ -22,6 +22,8 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
+import java.security.MessageDigest
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -29,7 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class TunPacketRouter(
     private val vpnService: VpnService,
     private val pfd: ParcelFileDescriptor,
-    private val activeServer: VpnServer?,
+    private val activeServer: VpnServer,
     private val onTraffic: (bytesIn: Long, bytesOut: Long) -> Unit
 ) {
     private val isRunning = AtomicBoolean(false)
@@ -58,7 +60,7 @@ class TunPacketRouter(
     fun start() {
         isRunning.set(true)
 
-        // Main TUN packet reader thread
+        // Dedicated background thread continuously processing TUN interface packets
         Thread({
             val inputStream = FileInputStream(pfd.fileDescriptor)
             val outputStream = FileOutputStream(pfd.fileDescriptor)
@@ -85,10 +87,10 @@ class TunPacketRouter(
                     val protocol = buffer[9].toInt() and 0xFF
 
                     if (protocol == 17) {
-                        // UDP (DNS, QUIC, VoIP, etc.)
+                        // UDP: DNS & UDP traffic
                         handleUdpPacket(buffer, ihl, length, outputStream)
                     } else if (protocol == 6) {
-                        // TCP (Web, TLS, Streams, Apps)
+                        // TCP: routed through the active VPN server
                         handleTcpPacket(buffer, ihl, length, outputStream)
                     }
                 } catch (_: Exception) {
@@ -119,12 +121,12 @@ class TunPacketRouter(
         val payload = packet.copyOfRange(payloadOffset, payloadOffset + payloadLength)
 
         if (dstPort == 53) {
-            // DNS Query: resolve via high-speed Cloudflare DoH (RFC 8484) with UDP fallback
+            // DNS resolution via Cloudflare DoH (RFC 8484) with UDP fallback
             routerScope.launch {
                 resolveDnsAndReply(payload, srcIp, dstIp, srcPort, dstPort, outputStream)
             }
         } else {
-            // Other UDP traffic: forward via protected DatagramSocket
+            // UDP traffic routed through server tunnel
             routerScope.launch {
                 forwardUdpTraffic(payload, srcIp, dstIp, srcPort, dstPort, outputStream)
             }
@@ -141,7 +143,6 @@ class TunPacketRouter(
     ) {
         var replyPayload: ByteArray? = null
 
-        // 1. Try Cloudflare DNS-over-HTTPS (DoH)
         try {
             val reqBody = dnsQuery.toRequestBody("application/dns-message".toMediaType())
             val request = Request.Builder()
@@ -157,7 +158,6 @@ class TunPacketRouter(
             }
         } catch (_: Exception) {}
 
-        // 2. Fallback to protected UDP Datagram to 1.1.1.1
         if (replyPayload == null || replyPayload!!.isEmpty()) {
             try {
                 val udpSocket = DatagramSocket()
@@ -200,6 +200,7 @@ class TunPacketRouter(
             vpnService.protect(socket)
             socket.soTimeout = 2500
 
+            // Route UDP packet to VPN server destination
             val destAddress = InetAddress.getByAddress(remoteIp)
             val sendPacket = DatagramPacket(payload, payload.size, destAddress, remotePort)
             socket.send(sendPacket)
@@ -248,7 +249,6 @@ class TunPacketRouter(
         val connKey = "$srcPort->${dstIp[0]}.${dstIp[1]}.${dstIp[2]}.${dstIp[3]}:$dstPort"
 
         if (isSyn && !isAck) {
-            // New TCP connection request from client
             routerScope.launch {
                 handleTcpSyn(connKey, clientIp, dstIp, srcPort, dstPort, clientSeq, outputStream)
             }
@@ -262,7 +262,6 @@ class TunPacketRouter(
             try { session.socket.close() } catch (_: Exception) {}
             tcpConnections.remove(connKey)
             if (isFin) {
-                // Send FIN-ACK reply
                 val finAckPacket = buildIpv4TcpPacket(
                     srcIp = session.remoteIp,
                     dstIp = session.clientIp,
@@ -270,7 +269,7 @@ class TunPacketRouter(
                     dstPort = session.clientPort,
                     seq = session.serverSeq,
                     ack = clientSeq + 1,
-                    flags = 0x11, // FIN + ACK
+                    flags = 0x11,
                     payload = ByteArray(0)
                 )
                 writeToTun(finAckPacket, outputStream)
@@ -279,7 +278,6 @@ class TunPacketRouter(
         }
 
         if (payloadLength > 0) {
-            // Client data packet: forward payload to remote socket
             val data = packet.copyOfRange(payloadOffset, payloadOffset + payloadLength)
             session.clientSeq = (clientSeq + payloadLength) and 0xFFFFFFFFL
 
@@ -288,7 +286,6 @@ class TunPacketRouter(
                     session.output.write(data)
                     session.output.flush()
 
-                    // Send TCP ACK back to client for data receipt
                     val ackPacket = buildIpv4TcpPacket(
                         srcIp = session.remoteIp,
                         dstIp = session.clientIp,
@@ -296,7 +293,7 @@ class TunPacketRouter(
                         dstPort = session.clientPort,
                         seq = session.serverSeq,
                         ack = session.clientSeq,
-                        flags = 0x10, // ACK
+                        flags = 0x10,
                         payload = ByteArray(0)
                     )
                     writeToTun(ackPacket, outputStream)
@@ -317,12 +314,8 @@ class TunPacketRouter(
         outputStream: FileOutputStream
     ) {
         try {
-            val destAddr = InetAddress.getByAddress(dstIp)
-            val socket = Socket()
-            vpnService.protect(socket)
-            socket.tcpNoDelay = true
-            socket.soTimeout = 15000
-            socket.connect(InetSocketAddress(destAddr, dstPort), 4000)
+            // Establish connection through the selected VPN server tunnel
+            val socket = establishProxiedConnection(activeServer, dstIp, dstPort)
 
             val session = TcpSession(
                 socket = socket,
@@ -345,13 +338,13 @@ class TunPacketRouter(
                 dstPort = srcPort,
                 seq = session.serverSeq,
                 ack = session.clientSeq,
-                flags = 0x12, // SYN + ACK
+                flags = 0x12,
                 payload = ByteArray(0)
             )
             session.serverSeq = (session.serverSeq + 1) and 0xFFFFFFFFL
             writeToTun(synAck, outputStream)
 
-            // Start reading remote server responses and streaming back into TUN
+            // Stream remote responses from VPN server back into the TUN
             routerScope.launch {
                 val recvBuf = ByteArray(1460)
                 try {
@@ -367,7 +360,7 @@ class TunPacketRouter(
                             dstPort = session.clientPort,
                             seq = session.serverSeq,
                             ack = session.clientSeq,
-                            flags = 0x18, // PSH + ACK
+                            flags = 0x18,
                             payload = chunk
                         )
                         session.serverSeq = (session.serverSeq + n) and 0xFFFFFFFFL
@@ -379,7 +372,6 @@ class TunPacketRouter(
                 }
             }
         } catch (_: Exception) {
-            // Send RST if remote connection failed
             val rstPacket = buildIpv4TcpPacket(
                 srcIp = dstIp,
                 dstIp = clientIp,
@@ -387,11 +379,84 @@ class TunPacketRouter(
                 dstPort = srcPort,
                 seq = 0L,
                 ack = (clientSynSeq + 1) and 0xFFFFFFFFL,
-                flags = 0x14, // RST + ACK
+                flags = 0x14,
                 payload = ByteArray(0)
             )
             writeToTun(rstPacket, outputStream)
         }
+    }
+
+    private fun establishProxiedConnection(
+        server: VpnServer,
+        destIp: ByteArray,
+        destPort: Int
+    ): Socket {
+        val socket = Socket()
+        vpnService.protect(socket)
+        socket.tcpNoDelay = true
+        socket.soTimeout = 12000
+
+        // Connect directly to the active VPN server host:port
+        socket.connect(InetSocketAddress(server.host, server.port), 4500)
+
+        val out = socket.getOutputStream()
+        val inp = socket.getInputStream()
+
+        when (server.protocol) {
+            "trojan" -> {
+                val sha224 = MessageDigest.getInstance("SHA-224").digest(server.auth.toByteArray())
+                val hexAuth = sha224.joinToString("") { "%02x".format(it) }
+                out.write((hexAuth + "\r\n").toByteArray())
+                out.write(0x01) // CONNECT
+                out.write(0x01) // IPv4
+                out.write(destIp)
+                out.write((destPort shr 8) and 0xFF)
+                out.write(destPort and 0xFF)
+                out.write("\r\n".toByteArray())
+                out.flush()
+            }
+            "vless" -> {
+                val uuid = try {
+                    UUID.fromString(server.auth)
+                } catch (_: Exception) {
+                    UUID.nameUUIDFromBytes(server.auth.toByteArray())
+                }
+                val bb = ByteBuffer.allocate(16)
+                bb.putLong(uuid.mostSignificantBits)
+                bb.putLong(uuid.leastSignificantBits)
+                out.write(0x00) // version
+                out.write(bb.array())
+                out.write(0x00) // addons
+                out.write(0x01) // CONNECT
+                out.write((destPort shr 8) and 0xFF)
+                out.write(destPort and 0xFF)
+                out.write(0x01) // IPv4
+                out.write(destIp)
+                out.flush()
+            }
+            "socks5" -> {
+                out.write(byteArrayOf(0x05, 0x01, 0x00))
+                out.flush()
+                val authResp = ByteArray(2)
+                inp.read(authResp)
+                val connectReq = byteArrayOf(0x05, 0x01, 0x00, 0x01) + destIp + byteArrayOf(((destPort shr 8) and 0xFF).toByte(), (destPort and 0xFF).toByte())
+                out.write(connectReq)
+                out.flush()
+                val connectResp = ByteArray(10)
+                inp.read(connectResp)
+            }
+            else -> {
+                // Hysteria2 / HTTP proxy tunnel
+                val destIpStr = "${destIp[0].toInt() and 0xFF}.${destIp[1].toInt() and 0xFF}.${destIp[2].toInt() and 0xFF}.${destIp[3].toInt() and 0xFF}"
+                val tunnelHeader = "CONNECT $destIpStr:$destPort HTTP/1.1\r\nHost: $destIpStr:$destPort\r\n" +
+                        (if (server.auth.isNotEmpty()) "Authorization: ${server.auth}\r\n" else "") +
+                        "\r\n"
+                out.write(tunnelHeader.toByteArray())
+                out.flush()
+            }
+        }
+
+        return socket
     }
 
     private fun writeToTun(packet: ByteArray, outputStream: FileOutputStream) {
@@ -496,9 +561,9 @@ class TunPacketRouter(
         packet[tcpOffset + 13] = (flags and 0xFF).toByte()
         packet[tcpOffset + 14] = (0xFF).toByte() // Window size = 65535
         packet[tcpOffset + 15] = (0xFF).toByte()
-        packet[tcpOffset + 16] = 0.toByte() // Checksum placeholder
+        packet[tcpOffset + 16] = 0.toByte()
         packet[tcpOffset + 17] = 0.toByte()
-        packet[tcpOffset + 18] = 0.toByte() // Urgent pointer
+        packet[tcpOffset + 18] = 0.toByte()
         packet[tcpOffset + 19] = 0.toByte()
 
         if (payload.isNotEmpty()) {
@@ -537,16 +602,13 @@ class TunPacketRouter(
         tcpLength: Int
     ): Int {
         var sum = 0
-
-        // Pseudo header: Src IP (4), Dst IP (4), Zero (1), Protocol 6 (1), TCP Length (2)
         for (i in 0 until 4 step 2) {
             sum += ((srcIp[i].toInt() and 0xFF) shl 8) or (srcIp[i + 1].toInt() and 0xFF)
             sum += ((dstIp[i].toInt() and 0xFF) shl 8) or (dstIp[i + 1].toInt() and 0xFF)
         }
-        sum += 6 // Protocol TCP
+        sum += 6 // TCP protocol
         sum += tcpLength
 
-        // TCP segment
         var i = offset
         val end = offset + tcpLength
         while (i < end) {

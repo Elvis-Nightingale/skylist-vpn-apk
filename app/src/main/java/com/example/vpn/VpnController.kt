@@ -45,6 +45,9 @@ object VpnController {
             putExtra(SkylistVpnService.EXTRA_SERVER_PORT, server.port)
             putExtra(SkylistVpnService.EXTRA_SERVER_PROTOCOL, server.protocol)
             putExtra(SkylistVpnService.EXTRA_SERVER_RAW, server.rawConfig)
+            putExtra(SkylistVpnService.EXTRA_SERVER_AUTH, server.auth)
+            putExtra(SkylistVpnService.EXTRA_SERVER_SNI, server.sni)
+            putExtra(SkylistVpnService.EXTRA_SERVER_ALPN, server.alpn)
         }
         ContextCompat.startForegroundService(context, intent)
     }

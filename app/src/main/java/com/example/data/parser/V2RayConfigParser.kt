@@ -1,5 +1,6 @@
 package com.example.data.parser
 
+import android.net.Uri
 import android.util.Base64
 import com.example.data.model.VpnServer
 import org.json.JSONObject
@@ -9,7 +10,7 @@ import java.util.UUID
 object V2RayConfigParser {
 
     private val CONFIG_REGEX = Regex(
-        """((?:hysteria2|vless|vmess|trojan|ss|hy2|hysteria)://.+?)(?=(?:hysteria2|vless|vmess|trojan|ss|hy2|hysteria)://|$)""",
+        """((?:hysteria2|vless|vmess|trojan|ss|hy2|hysteria|socks5|http)://.+?)(?=(?:hysteria2|vless|vmess|trojan|ss|hy2|hysteria|socks5|http)://|$)""",
         RegexOption.DOT_MATCHES_ALL
     )
 
@@ -68,9 +69,27 @@ object V2RayConfigParser {
         val mainPartWithQuery = if (hashIdx != -1) rest.substring(0, hashIdx) else rest
         val queryIdx = mainPartWithQuery.indexOf('?')
         val authority = if (queryIdx != -1) mainPartWithQuery.substring(0, queryIdx) else mainPartWithQuery
+        val queryString = if (queryIdx != -1) mainPartWithQuery.substring(queryIdx + 1) else ""
+
+        val queryParams = mutableMapOf<String, String>()
+        if (queryString.isNotEmpty()) {
+            queryString.split('&').forEach { param ->
+                val eqIdx = param.indexOf('=')
+                if (eqIdx != -1) {
+                    val key = param.substring(0, eqIdx).lowercase()
+                    val value = try {
+                        URLDecoder.decode(param.substring(eqIdx + 1), "UTF-8")
+                    } catch (_: Exception) {
+                        param.substring(eqIdx + 1)
+                    }
+                    queryParams[key] = value
+                }
+            }
+        }
 
         var host = ""
         var port = 443
+        var auth = ""
         var extractedName = decodedFragmentName
 
         if (protocol == "vmess" && !authority.contains("@") && !authority.contains(":")) {
@@ -80,16 +99,21 @@ object V2RayConfigParser {
                 val json = JSONObject(decodedJson)
                 host = json.optString("add", "")
                 port = json.optInt("port", 443)
+                auth = json.optString("id", "")
                 if (extractedName.isEmpty()) {
                     extractedName = json.optString("ps", "")
                 }
-            } catch (_: Exception) {
-                // fallback
-            }
+            } catch (_: Exception) {}
         }
 
         if (host.isEmpty()) {
-            val target = if (authority.contains("@")) authority.substringAfterLast('@') else authority
+            val target = if (authority.contains("@")) {
+                auth = authority.substringBeforeLast('@')
+                authority.substringAfterLast('@')
+            } else {
+                authority
+            }
+
             if (target.contains(":")) {
                 val lastColon = target.lastIndexOf(':')
                 host = target.substring(0, lastColon).trim('[', ']')
@@ -109,7 +133,9 @@ object V2RayConfigParser {
             else -> "$protocol - $host"
         }
 
-        // Unique ID including index so duplicate named servers (e.g. two "Japan" configs) have distinct keys
+        val sni = queryParams["sni"] ?: queryParams["peer"] ?: host
+        val alpn = queryParams["alpn"] ?: ""
+
         val uniqueId = UUID.nameUUIDFromBytes("$protocol://$host:$port#$finalName-$index".toByteArray()).toString()
 
         return VpnServer(
@@ -118,7 +144,10 @@ object V2RayConfigParser {
             rawConfig = line,
             protocol = protocol,
             host = host,
-            port = port
+            port = port,
+            auth = auth,
+            sni = sni,
+            alpn = alpn
         )
     }
 }

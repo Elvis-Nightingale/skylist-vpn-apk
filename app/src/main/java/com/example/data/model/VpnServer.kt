@@ -15,6 +15,9 @@ data class VpnServer(
     val protocol: String,
     val host: String,
     val port: Int,
+    val auth: String = "",
+    val sni: String = "",
+    val alpn: String = "",
     val pingMs: Long? = null,
     val pingStatus: PingStatus = PingStatus.IDLE,
     val lastPingTimestamp: Long = 0L

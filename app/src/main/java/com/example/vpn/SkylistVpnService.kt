@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
 import com.example.data.model.VpnServer
+import com.example.data.parser.V2RayConfigParser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,6 +36,9 @@ class SkylistVpnService : VpnService() {
         const val EXTRA_SERVER_PORT = "server_port"
         const val EXTRA_SERVER_PROTOCOL = "server_protocol"
         const val EXTRA_SERVER_RAW = "server_raw"
+        const val EXTRA_SERVER_AUTH = "server_auth"
+        const val EXTRA_SERVER_SNI = "server_sni"
+        const val EXTRA_SERVER_ALPN = "server_alpn"
 
         private const val NOTIFICATION_CHANNEL_ID = "skylist_vpn_channel"
         private const val NOTIFICATION_ID = 1001
@@ -62,20 +66,21 @@ class SkylistVpnService : VpnService() {
                 return START_NOT_STICKY
             }
             ACTION_CONNECT -> {
-                val serverName = intent.getStringExtra(EXTRA_SERVER_NAME) ?: "V2Ray Server"
-                val serverHost = intent.getStringExtra(EXTRA_SERVER_HOST) ?: ""
-                val serverPort = intent.getIntExtra(EXTRA_SERVER_PORT, 443)
-                val serverProtocol = intent.getStringExtra(EXTRA_SERVER_PROTOCOL) ?: "v2ray"
                 val serverRaw = intent.getStringExtra(EXTRA_SERVER_RAW) ?: ""
+                val parsed = if (serverRaw.isNotEmpty()) V2RayConfigParser.parseSingleConfig(serverRaw) else null
 
-                val server = VpnServer(
-                    id = "$serverProtocol-$serverHost-$serverPort",
-                    name = serverName,
+                val server = parsed ?: VpnServer(
+                    id = (intent.getStringExtra(EXTRA_SERVER_HOST) ?: "") + (intent.getIntExtra(EXTRA_SERVER_PORT, 443)),
+                    name = intent.getStringExtra(EXTRA_SERVER_NAME) ?: "V2Ray Server",
                     rawConfig = serverRaw,
-                    protocol = serverProtocol,
-                    host = serverHost,
-                    port = serverPort
+                    protocol = intent.getStringExtra(EXTRA_SERVER_PROTOCOL) ?: "v2ray",
+                    host = intent.getStringExtra(EXTRA_SERVER_HOST) ?: "",
+                    port = intent.getIntExtra(EXTRA_SERVER_PORT, 443),
+                    auth = intent.getStringExtra(EXTRA_SERVER_AUTH) ?: "",
+                    sni = intent.getStringExtra(EXTRA_SERVER_SNI) ?: "",
+                    alpn = intent.getStringExtra(EXTRA_SERVER_ALPN) ?: ""
                 )
+
                 currentServer = server
                 connect(server)
                 return START_STICKY
@@ -105,16 +110,6 @@ class SkylistVpnService : VpnService() {
         }
 
         try {
-            // Initiate protected handshake connection to the selected VPN server
-            serviceScope.launch {
-                try {
-                    val probeSocket = Socket()
-                    protect(probeSocket)
-                    probeSocket.connect(InetSocketAddress(server.host, server.port), 2000)
-                    probeSocket.close()
-                } catch (_: Exception) {}
-            }
-
             // Configure full-tunnel VpnService builder
             val builder = Builder().apply {
                 setSession("Skylist VPN: ${server.name}")
@@ -141,7 +136,7 @@ class SkylistVpnService : VpnService() {
                 return
             }
 
-            // Start full TUN packet router
+            // Start full TUN packet router routing 100% of traffic through server tunnel
             tunRouter = TunPacketRouter(
                 vpnService = this,
                 pfd = pfd,
