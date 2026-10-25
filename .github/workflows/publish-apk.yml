@@ -1,0 +1,78 @@
+name: Publish Debug APK Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'apk-distribution/app-debug.apk'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Validate Compiled APK
+        run: |
+          set -e
+          echo "Checking APK existence and integrity..."
+          if [ ! -f "apk-distribution/app-debug.apk" ]; then
+            echo "ERROR: apk-distribution/app-debug.apk not found!" >&2
+            exit 1
+          fi
+
+          if [ ! -s "apk-distribution/app-debug.apk" ]; then
+            echo "ERROR: apk-distribution/app-debug.apk is empty!" >&2
+            exit 1
+          fi
+
+          if [ ! -f "apk-distribution/app-debug.apk.sha256" ]; then
+            echo "ERROR: apk-distribution/app-debug.apk.sha256 not found!" >&2
+            exit 1
+          fi
+
+          cd apk-distribution
+          sha256sum -c app-debug.apk.sha256
+          unzip -tq app-debug.apk
+          cd ..
+          echo "APK validation successful."
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="debug-apk-build-${{ github.run_number }}-${{ github.run_attempt }}"
+          TITLE="Debug APK Build ${{ github.run_number }} (Attempt ${{ github.run_attempt }})"
+          APK_PATH="apk-distribution/app-debug.apk"
+          SHA256=$(sha256sum "$APK_PATH" | awk '{print $1}')
+          APK_SIZE=$(ls -lh "$APK_PATH" | awk '{print $5}')
+          REPO="${{ github.repository }}"
+
+          echo "Creating release $TAG for $REPO..."
+          gh release create "$TAG" "$APK_PATH" \
+            --title "$TITLE" \
+            --notes "### Skylist VPN - Android Debug APK
+          - **File:** \`app-debug.apk\`
+          - **Size:** $APK_SIZE
+          - **SHA-256:** \`$SHA256\`
+          - **Build:** AI Studio native environment
+          - **Direct Download:** https://github.com/$REPO/releases/latest/download/app-debug.apk" \
+            --latest
+
+          RELEASE_URL="https://github.com/$REPO/releases/tag/$TAG"
+          DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/app-debug.apk"
+
+          echo "### APK Release Published Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release Tag:** \`$TAG\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **APK Size:** $APK_SIZE" >> $GITHUB_STEP_SUMMARY
+          echo "- **SHA-256 Checksum:** \`$SHA256\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release Page:** [$RELEASE_URL]($RELEASE_URL)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Direct Download URL:** [$DOWNLOAD_URL]($DOWNLOAD_URL)" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,6 @@
+{
+  "name": "Skylist VPN",
+  "description": "High-performance V2Ray VPN client with live ping monitoring and seamless server connectivity.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
