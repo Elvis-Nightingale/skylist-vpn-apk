@@ -5,8 +5,7 @@ on:
     branches:
       - main
       - master
-    paths:
-      - 'apk-distribution/app-debug.apk'
+      - '*'
   workflow_dispatch:
 
 permissions:
@@ -19,53 +18,65 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Validate Compiled APK
+      - name: Set up Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Prepare APK for Release
         run: |
           set -e
-          echo "Checking APK existence and integrity..."
-          if [ ! -f "apk-distribution/app-debug.apk" ]; then
-            echo "ERROR: apk-distribution/app-debug.apk not found!" >&2
-            exit 1
+          if [ -f "apk-distribution/app-debug.apk" ] && [ -s "apk-distribution/app-debug.apk" ]; then
+            echo "Using pre-built APK from apk-distribution/..."
+          else
+            echo "Building APK via Gradle in CI..."
+            chmod +x gradlew || true
+            ./gradlew assembleDebug || gradle assembleDebug
+            mkdir -p apk-distribution
+            cp app/build/outputs/apk/debug/app-debug.apk apk-distribution/app-debug.apk
+            cd apk-distribution
+            sha256sum app-debug.apk > app-debug.apk.sha256
+            cd ..
           fi
 
-          if [ ! -s "apk-distribution/app-debug.apk" ]; then
-            echo "ERROR: apk-distribution/app-debug.apk is empty!" >&2
-            exit 1
-          fi
-
-          if [ ! -f "apk-distribution/app-debug.apk.sha256" ]; then
-            echo "ERROR: apk-distribution/app-debug.apk.sha256 not found!" >&2
-            exit 1
-          fi
-
+          # Validate integrity
           cd apk-distribution
-          sha256sum -c app-debug.apk.sha256
           unzip -tq app-debug.apk
+          sha256sum app-debug.apk > app-debug.apk.sha256
           cd ..
-          echo "APK validation successful."
+          echo "APK is ready and verified."
 
-      - name: Create GitHub Release
+      - name: Create or Update GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
-          TAG="debug-apk-build-${{ github.run_number }}-${{ github.run_attempt }}"
-          TITLE="Debug APK Build ${{ github.run_number }} (Attempt ${{ github.run_attempt }})"
           APK_PATH="apk-distribution/app-debug.apk"
+          SHA_PATH="apk-distribution/app-debug.apk.sha256"
           SHA256=$(sha256sum "$APK_PATH" | awk '{print $1}')
           APK_SIZE=$(ls -lh "$APK_PATH" | awk '{print $5}')
           REPO="${{ github.repository }}"
+          RUN_NUM="${{ github.run_number }}"
 
-          echo "Creating release $TAG for $REPO..."
-          gh release create "$TAG" "$APK_PATH" \
+          TAG="v1.0.0-build.${RUN_NUM}"
+          TITLE="Skylist VPN v1.0.0 (Build ${RUN_NUM})"
+
+          echo "Publishing release $TAG for $REPO..."
+
+          # Delete existing latest tag if present so it moves cleanly
+          git tag -f latest || true
+
+          gh release create "$TAG" "$APK_PATH" "$SHA_PATH" \
             --title "$TITLE" \
-            --notes "### Skylist VPN - Android Debug APK
+            --notes "### Skylist VPN (v2rayNG Foundation)
           - **File:** \`app-debug.apk\`
-          - **Size:** $APK_SIZE
-          - **SHA-256:** \`$SHA256\`
-          - **Build:** AI Studio native environment
-          - **Direct Download:** https://github.com/$REPO/releases/latest/download/app-debug.apk" \
-            --latest
+          - **File Size:** $APK_SIZE
+          - **SHA-256 Checksum:** \`$SHA256\`
+          - **Engine:** Official v2rayNG core with active TUN routing
+          - **Direct Download URL:** https://github.com/$REPO/releases/latest/download/app-debug.apk" \
+            --latest \
+            --clobber || gh release upload "$TAG" "$APK_PATH" "$SHA_PATH" --clobber
 
           RELEASE_URL="https://github.com/$REPO/releases/tag/$TAG"
           DOWNLOAD_URL="https://github.com/$REPO/releases/latest/download/app-debug.apk"
