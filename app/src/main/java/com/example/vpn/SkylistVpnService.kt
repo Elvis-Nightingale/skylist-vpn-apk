@@ -21,8 +21,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
 
 class SkylistVpnService : VpnService() {
@@ -136,21 +134,25 @@ class SkylistVpnService : VpnService() {
                 return
             }
 
-            // Start full TUN packet router routing 100% of traffic through server tunnel
-            tunRouter = TunPacketRouter(
-                vpnService = this,
-                pfd = pfd,
-                activeServer = server,
-                onTraffic = { bIn, bOut ->
-                    synchronized(this) {
-                        totalBytesIn += bIn
-                        totalBytesOut += bOut
+            // Start V2Ray native core engine
+            val isCoreStarted = V2RayCoreManager.startCore(this, server, pfd)
+            if (!isCoreStarted) {
+                // Resilient fallback router
+                tunRouter = TunPacketRouter(
+                    vpnService = this,
+                    pfd = pfd,
+                    activeServer = server,
+                    onTraffic = { bIn, bOut ->
+                        synchronized(this) {
+                            totalBytesIn += bIn
+                            totalBytesOut += bOut
+                        }
                     }
-                }
-            ).apply { start() }
+                ).apply { start() }
+            }
 
             VpnController.updateStatus(ConnectionStatus.CONNECTED, server = server)
-            updateNotification("Connected to ${server.name}", "V2Ray (${server.protocol.uppercase()}) tunnel active • Encrypted")
+            updateNotification("Connected to ${server.name}", "V2Ray (${server.protocol.uppercase()}) core active • Encrypted")
 
             startStatsTicker()
         } catch (e: Exception) {
@@ -194,6 +196,8 @@ class SkylistVpnService : VpnService() {
         isRunning.set(false)
         statsJob?.cancel()
         statsJob = null
+
+        V2RayCoreManager.stopCore()
 
         tunRouter?.stop()
         tunRouter = null
