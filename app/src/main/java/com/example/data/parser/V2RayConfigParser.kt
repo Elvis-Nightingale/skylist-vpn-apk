@@ -1,7 +1,5 @@
 package com.example.data.parser
 
-import android.net.Uri
-import android.util.Base64
 import com.example.data.model.VpnServer
 import org.json.JSONObject
 import java.net.URLDecoder
@@ -14,17 +12,20 @@ object V2RayConfigParser {
         RegexOption.DOT_MATCHES_ALL
     )
 
-    fun parseConfigList(rawText: String): List<VpnServer> {
+    fun parseConfigList(rawInput: String): List<VpnServer> {
         val servers = mutableListOf<VpnServer>()
-        if (rawText.isBlank()) return servers
+        if (rawInput.isBlank()) return servers
 
-        // Match configs even if concatenated without newlines (e.g. Japanhysteria2://) or separated by spaces
-        val matches = CONFIG_REGEX.findAll(rawText).map { it.groupValues[1].trim() }.toList()
+        // 1. Try Base64 decoding in case the GitHub file is a standard V2Ray Base64 subscription
+        val textToParse = decodeBase64SubscriptionIfApplicable(rawInput.trim())
+
+        // 2. Extract configs via regex (handles concatenated configs without newlines like Japanhysteria2://)
+        val matches = CONFIG_REGEX.findAll(textToParse).map { it.groupValues[1].trim() }.toList()
 
         val candidateStrings = if (matches.isNotEmpty()) {
             matches
         } else {
-            rawText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+            textToParse.lines().map { it.trim() }.filter { it.isNotEmpty() }
         }
 
         var index = 1
@@ -40,12 +41,42 @@ object V2RayConfigParser {
                     servers.add(server)
                     index++
                 }
-            } catch (_: Exception) {
-                // skip malformed line gracefully
-            }
+            } catch (_: Exception) {}
         }
 
         return servers
+    }
+
+    private fun decodeBase64SubscriptionIfApplicable(input: String): String {
+        // If it already starts with a recognized protocol scheme, it's plaintext
+        if (input.startsWith("hysteria2://") || input.startsWith("vless://") ||
+            input.startsWith("vmess://") || input.startsWith("trojan://") ||
+            input.startsWith("ss://") || input.startsWith("hy2://")
+        ) {
+            return input
+        }
+
+        // Try decoding as Base64 using Java Base64 with Android Base64 fallback
+        return try {
+            val cleaned = input.replace("\r", "").replace("\n", "").replace(" ", "")
+            val decodedBytes = try {
+                java.util.Base64.getDecoder().decode(cleaned)
+            } catch (_: Throwable) {
+                try {
+                    android.util.Base64.decode(cleaned, android.util.Base64.DEFAULT)
+                } catch (_: Throwable) {
+                    null
+                }
+            }
+            if (decodedBytes != null) {
+                val decodedStr = String(decodedBytes, Charsets.UTF_8)
+                if (decodedStr.contains("://")) decodedStr else input
+            } else {
+                input
+            }
+        } catch (_: Exception) {
+            input
+        }
     }
 
     fun parseSingleConfig(rawLine: String, index: Int = 1): VpnServer? {
@@ -93,9 +124,13 @@ object V2RayConfigParser {
         var extractedName = decodedFragmentName
 
         if (protocol == "vmess" && !authority.contains("@") && !authority.contains(":")) {
-            // Likely base64 encoded VMess JSON
             try {
-                val decodedJson = String(Base64.decode(authority, Base64.DEFAULT), Charsets.UTF_8)
+                val decodedJson = try {
+                    val b = java.util.Base64.getDecoder().decode(authority)
+                    String(b, Charsets.UTF_8)
+                } catch (_: Throwable) {
+                    String(android.util.Base64.decode(authority, android.util.Base64.DEFAULT), Charsets.UTF_8)
+                }
                 val json = JSONObject(decodedJson)
                 host = json.optString("add", "")
                 port = json.optInt("port", 443)

@@ -31,12 +31,17 @@ class ServerRepository(
 
     suspend fun fetchServersFromGitHub(): Result<List<VpnServer>> = withContext(Dispatchers.IO) {
         try {
+            // Append dynamic timestamp to bypass Fastly / GitHub CDN caches
+            val separator = if (GITHUB_CONFIG_URL.contains("?")) "&" else "?"
+            val cacheBusterUrl = "$GITHUB_CONFIG_URL${separator}_cb=${System.currentTimeMillis()}"
+
             val request = Request.Builder()
-                .url(GITHUB_CONFIG_URL)
+                .url(cacheBusterUrl)
                 .cacheControl(CacheControl.Builder().noCache().noStore().build())
-                .header("User-Agent", "SkylistVPN-Android/1.0")
-                .header("Cache-Control", "no-cache, no-store, must-revalidate")
+                .header("User-Agent", "SkylistVPN-Android/1.0 (v2rayNG Foundation)")
+                .header("Cache-Control", "no-cache, no-store, max-age=0, must-revalidate")
                 .header("Pragma", "no-cache")
+                .header("Expires", "0")
                 .build()
 
             client.newCall(request).execute().use { response ->
@@ -56,9 +61,7 @@ class ServerRepository(
         var pingSuccess = false
         var measuredLatency = -1L
 
-        // Primary stage: Probe specified server.host:server.port
-        // If Socket connects OR throws ConnectException (TCP RST from the remote host),
-        // the host is actively reachable on the IP network and the RTT is measured!
+        // Stage 1: Direct TCP connect / RST probe to server.host:server.port
         try {
             val socket = Socket()
             val t0 = System.currentTimeMillis()
@@ -67,6 +70,7 @@ class ServerRepository(
                 measuredLatency = (System.currentTimeMillis() - t0).coerceAtLeast(1L)
                 pingSuccess = true
             } catch (e: ConnectException) {
+                // Host replied with TCP RST -> host is alive and responding
                 measuredLatency = (System.currentTimeMillis() - t0).coerceAtLeast(1L)
                 pingSuccess = true
             } finally {
@@ -74,8 +78,7 @@ class ServerRepository(
             }
         } catch (_: Exception) {}
 
-        // Secondary stage: If server.port timed out (typical for UDP-only Hysteria2 QUIC servers on port 443),
-        // probe fallback ports 80/8080 on the same host to determine true network round-trip time.
+        // Stage 2: Fallback web ports (80/8080) for UDP-only hosts
         if (!pingSuccess) {
             val fallbackPorts = intArrayOf(80, 8080)
             for (port in fallbackPorts) {
@@ -98,7 +101,7 @@ class ServerRepository(
             }
         }
 
-        // Tertiary stage: Host ICMP reachability probe
+        // Stage 3: ICMP reachability probe
         if (!pingSuccess) {
             try {
                 val t0 = System.currentTimeMillis()

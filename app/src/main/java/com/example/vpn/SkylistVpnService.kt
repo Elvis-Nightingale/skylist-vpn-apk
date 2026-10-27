@@ -111,7 +111,7 @@ class SkylistVpnService : VpnService() {
             // Configure full-tunnel VpnService builder
             val builder = Builder().apply {
                 setSession("Skylist VPN: ${server.name}")
-                addAddress("10.0.0.2", 24)
+                addAddress("26.26.26.1", 30)
                 addDnsServer("1.1.1.1")
                 addDnsServer("8.8.8.8")
                 addRoute("0.0.0.0", 0) // Full device VPN tunnel
@@ -134,7 +134,7 @@ class SkylistVpnService : VpnService() {
                 return
             }
 
-            // Start V2Ray native core engine
+            // Start V2Ray native core engine with TUN inbound
             val isCoreStarted = V2RayCoreManager.startCore(this, server, pfd)
             if (!isCoreStarted) {
                 // Resilient fallback router
@@ -168,6 +168,14 @@ class SkylistVpnService : VpnService() {
             while (isActive && isRunning.get()) {
                 delay(1000L)
                 counter++
+
+                val nativeStats = V2RayCoreManager.queryTrafficStats()
+                if (nativeStats.first > 0L || nativeStats.second > 0L) {
+                    synchronized(this@SkylistVpnService) {
+                        totalBytesIn = nativeStats.first
+                        totalBytesOut = nativeStats.second
+                    }
+                }
 
                 val currentIn: Long
                 val currentOut: Long

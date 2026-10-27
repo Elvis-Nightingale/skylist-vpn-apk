@@ -28,8 +28,8 @@ class VpnViewModel(
 
     companion object {
         const val YOUTUBE_CHANNEL_URL = "https://www.youtube.com/@SkylerHeyes"
-        private const val AUTO_UPDATE_INTERVAL_MS = 15000L // Check GitHub for changes every 15 seconds
-        private const val AUTO_PING_INTERVAL_MS = 12000L   // Re-measure network ping every 12 seconds
+        private const val AUTO_UPDATE_INTERVAL_MS = 8000L // Auto-check GitHub every 8 seconds with cache-busting
+        private const val AUTO_PING_INTERVAL_MS = 10000L  // Auto-ping servers every 10 seconds
     }
 
     val vpnUiState: StateFlow<VpnUiState> = VpnController.uiState
@@ -66,17 +66,17 @@ class VpnViewModel(
             if (showLoading) {
                 _isLoadingServers.value = true
             }
-            _fetchError.value = null
             val result = repository.fetchServersFromGitHub()
             result.onSuccess { fetchedList ->
                 _isLoadingServers.value = false
+                _fetchError.value = null
                 _lastSyncTimestamp.value = System.currentTimeMillis()
 
-                val currentConfigs = _servers.value.map { it.rawConfig }
-                val newConfigs = fetchedList.map { it.rawConfig }
+                val currentRawConfigs = _servers.value.map { it.rawConfig }
+                val newRawConfigs = fetchedList.map { it.rawConfig }
 
                 // Check if list changed or if this is the initial load
-                if (_servers.value.isEmpty() || currentConfigs != newConfigs) {
+                if (_servers.value.isEmpty() || currentRawConfigs != newRawConfigs) {
                     _servers.value = fetchedList
 
                     // Keep selected server or select first
@@ -133,7 +133,6 @@ class VpnViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             _isPinging.value = true
 
-            // Set pinging status on all servers
             _servers.update { list ->
                 list.map { it.copy(pingStatus = PingStatus.PINGING) }
             }
